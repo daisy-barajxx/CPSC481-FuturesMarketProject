@@ -1,30 +1,28 @@
 <div align="center">
 
-# Analyzing Liquidity & Options Greek Influence
+# Future Market: Profit from the bid-ask spread
 
-</div>
+</div> 
 
-#### Context: 
-
-A market maker tries to:
-1. Buy at the bid
-2. Sell at the ask
-
-If both happen, they capture the **spread**.
-That profit comes from liquidity (how quickly you can access funds for expenses or opportunities)
-
-### Goal: 
-The goal is to understand the *futures market*. We are studying how Market Makers provide liquidity and identifying the exact moments when Options Greeks (Gamma/Vanna) turn a "safe" **spread** into a high-risk "toxic" zone.
-
-### Targeted Variables: 
-
-1. MBO_1 through MBO_14
-2. call_gamma & call_vanna
-3. MBO_pulling_stacking 
-4. future_strike
-5. Side
-
- ??
+### When is it profitable to capture the bid–ask spread, and how do order book (MBO) activity and options Greeks options affect the risk of price moving against you?
 
 
+## Features 
+
+**| Timestamp | Side | MBO_pulling_stacking | spx_strike | spx_price | call_delta | call_gamma | call_vega|  put_delta | put_gamma | put_vega | MBO_1 - MBO_14 |**
+
+- #### Timestamp: 
+- #### Side: 
+- #### MBO_pulling_stacking
+- #### spx_strike
+- #### spx_price
+- #### call_delta
+- #### call_gamma
+- #### call_vega
+- #### put_delta
+- #### put_gamma
+- #### put_vega
+- #### MBO_1 - MBO_14
+
+> Question as a **Market Maker**: If I placed a trade right now, would I get paid the spread or lose money?
 
