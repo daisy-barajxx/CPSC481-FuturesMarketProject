@@ -1,0 +1,108 @@
+import pandas as pd
+import numpy as np
+import ast
+from pathlib import Path
+
+DATA_DIR = Path(__file__).parent.parent / 'dataset'
+FILES = ['futures_0414.csv', 'futures_0422.csv', 'fixed_output.csv']
+
+# ── 1. Load & merge ──────────────────────────────────────────────
+dfs = []
+for f in FILES:
+    path = DATA_DIR / f
+    if path.exists():
+        tmp = pd.read_csv(path)
+        tmp['source_file'] = f          # track which file each row came from
+        dfs.append(tmp)
+        print(f"Loaded {f}: {len(tmp):,} rows")
+    else:
+        print(f"WARNING: {f} not found, skipping")
+
+df = pd.concat(dfs, ignore_index=True)
+print(f"\nCombined: {len(df):,} rows")
+
+# ── 2. Timestamp ─────────────────────────────────────────────────
+df['timestamp'] = pd.to_datetime(df['timestamp'], format='mixed', utc=True)
+df = df.sort_values('timestamp').reset_index(drop=True)
+
+# ── 3. Parse MBO list → features ─────────────────────────────────
+def parse_mbo(val):
+    try:
+        lst = ast.literal_eval(val) if isinstance(val, str) else val
+        if not isinstance(lst, list) or len(lst) == 0:
+            return pd.Series({'mbo_total': 0, 'mbo_levels': 0, 'mbo_max': 0, 'mbo_mean': 0})
+        arr = [float(x) for x in lst if x is not None]
+        return pd.Series({
+            'mbo_total':  sum(arr),
+            'mbo_levels': len(arr),
+            'mbo_max':    max(arr),
+            'mbo_mean':   np.mean(arr)
+        })
+    except:
+        return pd.Series({'mbo_total': 0, 'mbo_levels': 0, 'mbo_max': 0, 'mbo_mean': 0})
+
+mbo_features = df['MBO'].apply(parse_mbo)
+df = pd.concat([df, mbo_features], axis=1)
+
+# ── 4. Basic cleaning ─────────────────────────────────────────────
+# Normalize price (current_es_price looks like it's ×100)
+df['spx_price_clean'] = df['current_es_price'] / 100
+
+# Moneyness: positive = call ITM / put OTM
+df['moneyness'] = df['spx_price_clean'] - df['spx_strike']
+
+# Side as binary
+df['is_ask'] = (df['Side'] == 'Ask').astype(int)
+
+# Drop rows with no strike (can't analyze spread without it)
+df = df.dropna(subset=['future_strike', 'spx_price_clean'])
+
+# ── 5. Dedup: same timestamp + side + strike may appear in multiple files
+df = df.drop_duplicates(subset=['timestamp', 'Side', 'future_strike'])
+print(f"After dedup: {len(df):,} rows")
+
+# ── 6. Quick sanity check ─────────────────────────────────────────
+print("\n── Column overview ──")
+print(df.dtypes)
+print("\n── Nulls ──")
+print(df.isnull().sum()[df.isnull().sum() > 0])
+print("\n── Side distribution ──")
+print(df['Side'].value_counts())
+print("\n── Date range ──")
+print(f"  From: {df['timestamp'].min()}")
+print(f"  To:   {df['timestamp'].max()}")
+print("\n── Greeks sample stats ──")
+print(df[['call_delta','call_gamma','call_vega','put_delta','put_gamma','put_vega']].describe())
+
+# ── 7. Expand MBO list → MBO_1 to MBO_14 ────────────────────────
+def expand_mbo(val, n=14):
+    try:
+        lst = ast.literal_eval(val) if isinstance(val, str) else val
+        lst = [float(x) for x in lst] if isinstance(lst, list) else []
+    except:
+        lst = []
+    lst = lst[:n]                        # cap at 14
+    lst += [0.0] * (n - len(lst))        # pad with 0s
+    return lst
+
+mbo_expanded = df['MBO'].apply(lambda x: expand_mbo(x, 14))
+mbo_df = pd.DataFrame(mbo_expanded.tolist(),
+                      columns=[f'MBO_{i+1}' for i in range(14)],
+                      index=df.index)
+
+# ── 8. Select final columns ───────────────────────────────────────
+keep = ['timestamp', 'Side', 'MBO_pulling_stacking','future_strike',
+        'spx_strike', 'spx_price_clean',
+        'call_delta', 'call_gamma', 'call_vega',
+        'put_delta',  'put_gamma',  'put_vega']
+
+df_final = pd.concat([df[keep], mbo_df], axis=1)
+df_final = df_final.rename(columns={'spx_price_clean': 'spx_price'})
+
+print(f"\nFinal columns: {list(df_final.columns)}")
+print(df_final.head(3))
+
+# ── 9. Save cleaned file ──────────────────────────────────────────
+out_path = DATA_DIR / 'cleaned.csv'
+df_final.to_csv(out_path, index=False)
+print(f"\nSaved to {out_path}")
