@@ -14,7 +14,7 @@ def get_clean_data():
     # df = pd.read_csv(DATA_FILENAME)
     
     # For this example, I'll assume 'df' is loaded from your CSV
-    df = pd.read_csv('data/futures_0414.csv')
+    df = pd.read_csv(Path(__file__).parent.parent / 'dataset' / 'futures_0414.csv')
     df['timestamp'] = pd.to_datetime(df['timestamp'])
     
     # 1. Parse MBO Sizes
@@ -42,7 +42,7 @@ def get_clean_data():
         })
 
     # Group by second to make the chart readable
-    summary = df.groupby(df['timestamp'].dt.floor('S')).apply(get_snapshot).reset_index()
+    summary = df.groupby(df['timestamp'].dt.floor('s')).apply(get_snapshot).reset_index()
     return summary
 
 # --- UI ---
