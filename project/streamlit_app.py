@@ -28,6 +28,7 @@ SPREAD_NEGATIVE  = 0.0
 GAMMA_THRESHOLD  = 0.0006
 PNL_PER_POINT    = 50.0
 PRED_STEPS       = 5
+FILL_LOOKAHEAD = 15
 
 # ── Load & prepare ────────────────────────────────────────────────
 @st.cache_data
@@ -84,12 +85,85 @@ def get_signal(spread, gamma):
         return ("WAIT — Spread too narrow", "red",
                 f"Spread {spread:.4f} pts — between 0 and 1 tick. Wait for clean 0.25 tick.")
 
-# ── P&L ───────────────────────────────────────────────────────────
-def calc_pnl(entry_row, exit_row):
-    spread_capture = entry_row['Spread'] / 2
-    mid_move       = abs(exit_row['Mid'] - entry_row['Mid'])
-    pnl_pts        = spread_capture - mid_move * 0.5
-    return round(pnl_pts, 4), round(pnl_pts * PNL_PER_POINT, 2)
+# ── Market Making P&L ─────────────────────────────────────────────
+def is_clean_market(row):
+    return (
+        pd.notna(row["Best_Ask"])
+        and pd.notna(row["Best_Bid"])
+        and row["Best_Ask"] > row["Best_Bid"]
+        and row["Spread"] > 0
+    )
+
+
+def simulate_quote_fill(quote_row, future_rows):
+    """
+    Market maker posts BOTH:
+    - buy limit at bid
+    - sell limit at ask
+
+    Profit happens only if both sides fill.
+    """
+
+    bid_price = quote_row["Best_Bid"]
+    ask_price = quote_row["Best_Ask"]
+    spread = quote_row["Spread"]
+
+    if spread <= 0:
+        return None
+
+    buy_filled = False
+    sell_filled = False
+    buy_time = None
+    sell_time = None
+
+    for _, row in future_rows.iterrows():
+        # Skip bad market states
+        if not is_clean_market(row):
+            continue
+
+        # Buy order fills if market ask trades down to our bid
+        if not buy_filled and row["Best_Ask"] <= bid_price:
+            buy_filled = True
+            buy_time = row["timestamp"]
+
+        # Sell order fills if market bid trades up to our ask
+        if not sell_filled and row["Best_Bid"] >= ask_price:
+            sell_filled = True
+            sell_time = row["timestamp"]
+
+        if buy_filled and sell_filled:
+            pnl_pts = ask_price - bid_price
+            pnl_usd = pnl_pts * PNL_PER_POINT
+
+            return {
+                "filled": True,
+                "buy_time": buy_time,
+                "sell_time": sell_time,
+                "bid_price": bid_price,
+                "ask_price": ask_price,
+                "spread": spread,
+                "pnl_pts": round(pnl_pts, 4),
+                "pnl_usd": round(pnl_usd, 2),
+                "result": "✅ SPREAD CAPTURED"
+            }
+
+    return {
+        "filled": False,
+        "buy_time": buy_time,
+        "sell_time": sell_time,
+        "bid_price": bid_price,
+        "ask_price": ask_price,
+        "spread": spread,
+        "pnl_pts": 0.0,
+        "pnl_usd": 0.0,
+       "result": " PARTIAL / NOT BOTH FILLED"
+    }
+# # ── P&L ───────────────────────────────────────────────────────────
+# def calc_pnl(entry_row, exit_row):
+#     spread_capture = entry_row['Spread'] / 2
+#     mid_move       = abs(exit_row['Mid'] - entry_row['Mid'])
+#     pnl_pts        = spread_capture - mid_move * 0.5
+#     return round(pnl_pts, 4), round(pnl_pts * PNL_PER_POINT, 2)
 
 # ── Build figure ──────────────────────────────────────────────────
 def build_fig(df_slice, entry_ticks=None, exit_ticks=None, open_tick=None):
@@ -275,102 +349,181 @@ with st.expander("Why this signal?", expanded=False):
 
 | Condition | Threshold |
 |-----------|-----------|
-| Spread > 0 pts | Enter |
+| Spread > 0 pts | Quote both sides |
+| Spread = 0 | Locked market — avoid |
+| Spread < 0 | Crossed/bad market — reject |
+| Both bid and ask fill | Capture spread |
 | Gamma < {GAMMA_THRESHOLD} | Low risk |
 """)
 
-# ── Trade button ──────────────────────────────────────────────────
-open_trade = st.session_state.open_trade
-ba, bb, _ = st.columns([1, 1, 4])
+# # ── Trade button ──────────────────────────────────────────────────
+# open_trade = st.session_state.open_trade
+# ba, bb, _ = st.columns([1, 1, 4])
+
+# with ba:
+#     if open_trade is None:
+#         # No open position → quote both sides simultaneously
+#         btn_label    = "🟢 Quote Market (Buy + Sell)"
+#         btn_disabled = spread_val <= SPREAD_NEGATIVE
+#     else:
+#         # Open position → close both sides
+#         btn_label    = "🔴 Close Quote"
+#         btn_disabled = False
+
+#     if st.button(btn_label, disabled=btn_disabled, use_container_width=True):
+#         if open_trade is None:
+#             # Open: post bid AND ask at the same time
+#             st.session_state.open_trade = {
+#                 'tick': tick, 'timestamp': latest['timestamp'],
+#                 'mid': mid_val,
+#                 'ask': latest['Best_Ask'], 'bid': latest['Best_Bid'],
+#                 'spread': spread_val, 'gamma': gamma_val,
+#             }
+#         else:
+#             # Close: collect spread from both sides
+#             entry = st.session_state.open_trade
+#             pnl_pts, pnl_usd = calc_pnl(
+#                 pd.Series({'Spread': entry['spread'], 'Mid': entry['mid']}),
+#                 pd.Series({'Mid': mid_val})
+#             )
+#             st.session_state.trade_log.append({
+#                 'id':           len(st.session_state.trade_log) + 1,
+#                 'entry_tick':   entry['tick'], 'exit_tick': tick,
+#                 'entry_time':   entry['timestamp'].strftime('%H:%M:%S'),
+#                 'exit_time':    latest['timestamp'].strftime('%H:%M:%S'),
+#                 'entry_mid':    entry['mid'], 'exit_mid': mid_val,
+#                 'entry_spread': entry['spread'],
+#                 'pnl_pts':      pnl_pts, 'pnl_usd': pnl_usd,
+#                 'result':       '✅ WIN' if pnl_usd >= 0 else '❌ LOSS',
+#             })
+#             st.session_state.total_pnl  += pnl_usd
+#             st.session_state.open_trade  = None
+#         st.rerun()
+
+# with bb:
+#     if st.button("Reset", use_container_width=True):
+#         st.session_state.update({'open_trade': None, 'trade_log': [], 'total_pnl': 0.0})
+#         st.rerun()
+
+# if open_trade:
+#     _, unr_usd = calc_pnl(
+#         pd.Series({'Spread': open_trade['spread'], 'Mid': open_trade['mid']}),
+#         pd.Series({'Mid': mid_val})
+#     )
+#     st.info(
+#         f"📌 **Quoting both sides** | "
+#         f"Bid: {open_trade['bid']:.2f} / Ask: {open_trade['ask']:.2f} | "
+#         f"Spread: {open_trade['spread']:.4f} pts | "
+#         f"Unrealized P&L: **${unr_usd:+.2f}**"
+#     )
+# ── Market Making Button ──────────────────────────────────────────
+ba, bb, _ = st.columns([1.4, 1, 3.6])
+
+clean_market = is_clean_market(latest)
+safe_gamma = gamma_val < GAMMA_THRESHOLD
+can_quote = clean_market and safe_gamma
 
 with ba:
-    if open_trade is None:
-        # No open position → quote both sides simultaneously
-        btn_label    = "🟢 Quote Market (Buy + Sell)"
-        btn_disabled = spread_val <= SPREAD_NEGATIVE
-    else:
-        # Open position → close both sides
-        btn_label    = "🔴 Close Quote"
-        btn_disabled = False
+    if st.button(
+        "🟢 Quote Both Sides",
+        disabled=not can_quote,
+        use_container_width=True
+    ):
+        lookahead = df_all.iloc[tick:min(tick + FILL_LOOKAHEAD, total)]
 
-    if st.button(btn_label, disabled=btn_disabled, use_container_width=True):
-        if open_trade is None:
-            # Open: post bid AND ask at the same time
-            st.session_state.open_trade = {
-                'tick': tick, 'timestamp': latest['timestamp'],
-                'mid': mid_val,
-                'ask': latest['Best_Ask'], 'bid': latest['Best_Bid'],
-                'spread': spread_val, 'gamma': gamma_val,
-            }
+        fill_result = simulate_quote_fill(latest, lookahead)
+
+        if fill_result is None:
+            st.warning("Bad market state. Quote rejected.")
         else:
-            # Close: collect spread from both sides
-            entry = st.session_state.open_trade
-            pnl_pts, pnl_usd = calc_pnl(
-                pd.Series({'Spread': entry['spread'], 'Mid': entry['mid']}),
-                pd.Series({'Mid': mid_val})
-            )
             st.session_state.trade_log.append({
-                'id':           len(st.session_state.trade_log) + 1,
-                'entry_tick':   entry['tick'], 'exit_tick': tick,
-                'entry_time':   entry['timestamp'].strftime('%H:%M:%S'),
-                'exit_time':    latest['timestamp'].strftime('%H:%M:%S'),
-                'entry_mid':    entry['mid'], 'exit_mid': mid_val,
-                'entry_spread': entry['spread'],
-                'pnl_pts':      pnl_pts, 'pnl_usd': pnl_usd,
-                'result':       '✅ WIN' if pnl_usd >= 0 else '❌ LOSS',
+                "id": len(st.session_state.trade_log) + 1,
+                "quote_tick": tick,
+                "quote_time": latest["timestamp"].strftime("%H:%M:%S"),
+                "bid_price": fill_result["bid_price"],
+                "ask_price": fill_result["ask_price"],
+                "spread": fill_result["spread"],
+                "buy_time": fill_result["buy_time"].strftime("%H:%M:%S") if fill_result["buy_time"] is not None else "—",
+                "sell_time": fill_result["sell_time"].strftime("%H:%M:%S") if fill_result["sell_time"] is not None else "—",
+                "pnl_pts": fill_result["pnl_pts"],
+                "pnl_usd": fill_result["pnl_usd"],
+                "result": fill_result["result"],
             })
-            st.session_state.total_pnl  += pnl_usd
-            st.session_state.open_trade  = None
+
+            st.session_state.total_pnl += fill_result["pnl_usd"]
+
         st.rerun()
 
 with bb:
-    if st.button("↺ Reset", use_container_width=True):
-        st.session_state.update({'open_trade': None, 'trade_log': [], 'total_pnl': 0.0})
+    if st.button("Reset", use_container_width=True):
+        st.session_state.update({
+            "open_trade": None,
+            "trade_log": [],
+            "total_pnl": 0.0
+        })
         st.rerun()
-
-if open_trade:
-    _, unr_usd = calc_pnl(
-        pd.Series({'Spread': open_trade['spread'], 'Mid': open_trade['mid']}),
-        pd.Series({'Mid': mid_val})
-    )
-    st.info(
-        f"📌 **Quoting both sides** | "
-        f"Bid: {open_trade['bid']:.2f} / Ask: {open_trade['ask']:.2f} | "
-        f"Spread: {open_trade['spread']:.4f} pts | "
-        f"Unrealized P&L: **${unr_usd:+.2f}**"
-    )
-
 # ── Draw ──────────────────────────────────────────────────────────
 def draw(t):
     s   = max(0, t - window_size)
     vis = df_all.iloc[s:t]
     lat = vis.iloc[-1]
+    quote_ticks = [
+        tr['quote_tick'] - 1 - s
+        for tr in st.session_state.trade_log
+        if s <= tr['quote_tick'] - 1 < t
+    ]
 
-    eticks = [tr['entry_tick'] - 1 - s for tr in st.session_state.trade_log if s <= tr['entry_tick'] - 1 < t]
-    xticks = [tr['exit_tick']  - 1 - s for tr in st.session_state.trade_log if s <= tr['exit_tick']  - 1 < t]
-    ot     = st.session_state.open_trade
-    otick  = (ot['tick'] - 1 - s) if (ot and s <= ot['tick'] - 1 < t) else None
-
-    chart_ph.plotly_chart(build_fig(vis, eticks, xticks, otick), use_container_width=True)
+    chart_ph.plotly_chart(build_fig(vis, quote_ticks), use_container_width=True)
 
     time_ph.markdown(
         f"<p style='text-align:center;color:#888;font-size:13px;'>"
         f"⏱ <b style='color:white'>{lat['timestamp'].strftime('%Y-%m-%d %H:%M:%S UTC')}</b>"
         f" &nbsp;|&nbsp; Tick {t} / {total}</p>", unsafe_allow_html=True
     )
-
     if st.session_state.trade_log:
         log_df = pd.DataFrame(st.session_state.trade_log)[
-            ['id','entry_time','exit_time','entry_mid','exit_mid','entry_spread','pnl_pts','pnl_usd','result']
-        ].rename(columns={'id':'#','entry_time':'Entry','exit_time':'Exit',
-                          'entry_mid':'Entry Mid','exit_mid':'Exit Mid',
-                          'entry_spread':'Spread','pnl_pts':'P&L (pts)','pnl_usd':'P&L (USD)','result':'Result'})
+            [
+                "id", "quote_time", "bid_price", "ask_price",
+                "spread", "buy_time", "sell_time",
+                "pnl_pts", "pnl_usd", "result"
+            ]
+        ].rename(columns={
+            "id": "#",
+            "quote_time": "Quote Time",
+            "bid_price": "Quoted Bid",
+            "ask_price": "Quoted Ask",
+            "spread": "Spread",
+            "buy_time": "Buy Fill",
+            "sell_time": "Sell Fill",
+            "pnl_pts": "P&L (pts)",
+            "pnl_usd": "P&L (USD)",
+            "result": "Result"
+        })
+
         with tradelog_ph.container():
-            st.subheader("Trade Log")
-            st.dataframe(log_df.style.map(
-                lambda v: 'color:#00cc96' if isinstance(v,(int,float)) and v>0
-                     else ('color:#ff4b4b' if isinstance(v,(int,float)) and v<0 else ''),
-                subset=['P&L (pts)','P&L (USD)']), use_container_width=True, hide_index=True)
+            st.subheader("Market Making Log")
+            st.dataframe(
+                log_df.style.map(
+                    lambda v: "color:#00cc96" if isinstance(v, (int, float)) and v > 0
+                    else ("color:#ff4b4b" if isinstance(v, (int, float)) and v < 0 else ""),
+                    subset=["P&L (pts)", "P&L (USD)"]
+                ),
+                use_container_width=True,
+                hide_index=True
+            )
+
+    # if st.session_state.trade_log:
+    #     log_df = pd.DataFrame(st.session_state.trade_log)[
+    #         ['id','entry_time','exit_time','entry_mid','exit_mid','entry_spread','pnl_pts','pnl_usd','result']
+    #     ].rename(columns={'id':'#','entry_time':'Entry','exit_time':'Exit',
+    #                       'entry_mid':'Entry Mid','exit_mid':'Exit Mid',
+    #                       'entry_spread':'Spread','pnl_pts':'P&L (pts)','pnl_usd':'P&L (USD)','result':'Result'})
+    #     with tradelog_ph.container():
+    #         st.subheader("Trade Log")
+    #         st.dataframe(log_df.style.map(
+    #             lambda v: 'color:#00cc96' if isinstance(v,(int,float)) and v>0
+    #                  else ('color:#ff4b4b' if isinstance(v,(int,float)) and v<0 else ''),
+    #             subset=['P&L (pts)','P&L (USD)']), use_container_width=True, hide_index=True)
 
 # ── Run / pause ───────────────────────────────────────────────────
 if running:
