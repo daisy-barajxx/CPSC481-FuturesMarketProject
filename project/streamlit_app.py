@@ -26,15 +26,10 @@ components.html("""
 """, height=0)
 
 # ── Constants ─────────────────────────────────────────────────────
-# Spread threshold: your data shows spreads are almost always exactly
-# 0.25 (the ES 1-tick minimum) or 0.0/negative (crossed/locked market).
-# So the real signal is simply: spread must be POSITIVE and NORMAL.
-# We use > 0.0 to enter on any valid spread, and flag negatives as bad data.
-SPREAD_THRESHOLD = 0.0    # enter whenever spread is positive (data-driven)
-SPREAD_NEGATIVE  = 0.0    # below this = crossed/bad market, never enter
-GAMMA_THRESHOLD  = 0.0006 # kept for display but never blocks entry in this dataset
-                           # (100% of your ticks have gamma < 0.0006)
-PNL_PER_POINT    = 50.0   # ES futures: $50 per point
+SPREAD_THRESHOLD = 0.0
+SPREAD_NEGATIVE  = 0.0
+GAMMA_THRESHOLD  = 0.0006
+PNL_PER_POINT    = 50.0
 
 # ── Load & prepare ────────────────────────────────────────────────
 @st.cache_data
@@ -67,13 +62,6 @@ def load_data():
 
 # ── Signal logic ─────────────────────────────────────────────────
 def get_signal(spread, gamma):
-    """
-    Signal logic updated to match actual dataset characteristics:
-      - Spreads in this data are almost always 0.25 (1 ES tick) or 0.0
-      - Negative spreads mean bid > ask (crossed market = bad/stale data)
-      - Gamma < 0.0006 on 100% of ticks, so it never blocks entry here
-      - Real decision: is the spread positive and valid?
-    """
     if spread < SPREAD_NEGATIVE:
         return (
             "BAD DATA — Negative spread (crossed market)",
@@ -120,12 +108,6 @@ def get_signal(spread, gamma):
 
 # ── P&L calculation ───────────────────────────────────────────────
 def calc_pnl(entry_row, exit_row):
-    """
-    Simplified market-maker P&L model:
-      - Gross profit = entry spread / 2  (you earn half the spread on each leg)
-      - Adverse selection cost = |mid price move| * 0.5
-      - Net P&L in points, then convert to dollars
-    """
     spread_capture = entry_row['Spread'] / 2
     mid_move       = abs(exit_row['Mid'] - entry_row['Mid'])
     pnl_pts        = spread_capture - mid_move * 0.5
@@ -135,18 +117,11 @@ def calc_pnl(entry_row, exit_row):
 
 # ── Build main figure ─────────────────────────────────────────────
 def build_fig(df_slice, entry_ticks=None, exit_ticks=None, open_tick=None):
-    ts       = df_slice['timestamp']
-    ask      = df_slice['Best_Ask']
-    bid      = df_slice['Best_Bid']
-    spread   = df_slice['Spread']
+    ts  = df_slice['timestamp']
+    ask = df_slice['Best_Ask']
+    bid = df_slice['Best_Bid']
 
-    fig = make_subplots(
-        rows=2, cols=1,
-        row_heights=[0.72, 0.28],
-        shared_xaxes=True,
-        vertical_spacing=0.04,
-        subplot_titles=("", "")
-    )
+    fig = go.Figure()
 
     # Spread fill zone
     fig.add_trace(go.Scatter(
@@ -155,7 +130,7 @@ def build_fig(df_slice, entry_ticks=None, exit_ticks=None, open_tick=None):
         fill='toself', fillcolor='rgba(150,150,150,0.12)',
         line=dict(width=0), showlegend=True, name='Spread zone',
         hoverinfo='skip'
-    ), row=1, col=1)
+    ))
 
     # Best Ask line
     fig.add_trace(go.Scatter(
@@ -163,7 +138,7 @@ def build_fig(df_slice, entry_ticks=None, exit_ticks=None, open_tick=None):
         line=dict(color='#ff4b4b', width=1.5),
         name='Best Ask',
         customdata=np.stack([
-            spread.round(4),
+            df_slice['Spread'].round(4),
             df_slice['Mid'].round(4),
             df_slice['Gamma'].round(7),
         ], axis=-1),
@@ -173,7 +148,7 @@ def build_fig(df_slice, entry_ticks=None, exit_ticks=None, open_tick=None):
             '<b>Mid:</b> %{customdata[1]}<br>'
             '<b>Gamma:</b> %{customdata[2]}<extra></extra>'
         )
-    ), row=1, col=1)
+    ))
 
     # Best Bid line
     fig.add_trace(go.Scatter(
@@ -181,7 +156,7 @@ def build_fig(df_slice, entry_ticks=None, exit_ticks=None, open_tick=None):
         line=dict(color='#00cc96', width=1.5),
         name='Best Bid',
         hovertemplate='<b>Bid:</b> %{y:.2f}<extra></extra>'
-    ), row=1, col=1)
+    ))
 
     # Entry markers
     if entry_ticks:
@@ -194,7 +169,7 @@ def build_fig(df_slice, entry_ticks=None, exit_ticks=None, open_tick=None):
                 marker=dict(symbol='triangle-up', size=14, color='#00aaff', line=dict(color='white', width=1)),
                 name='Entry',
                 hovertemplate='<b>ENTRY</b> at %{y:.2f}<extra></extra>'
-            ), row=1, col=1)
+            ))
 
     # Exit markers
     if exit_ticks:
@@ -207,9 +182,9 @@ def build_fig(df_slice, entry_ticks=None, exit_ticks=None, open_tick=None):
                 marker=dict(symbol='x', size=14, color='#ffaa00', line=dict(color='white', width=1.5)),
                 name='Exit',
                 hovertemplate='<b>EXIT</b> at %{y:.2f}<extra></extra>'
-            ), row=1, col=1)
+            ))
 
-    # Open trade marker (current open position)
+    # Open trade marker
     if open_tick is not None and open_tick < len(df_slice):
         ot = df_slice.iloc[open_tick]
         fig.add_trace(go.Scatter(
@@ -218,27 +193,7 @@ def build_fig(df_slice, entry_ticks=None, exit_ticks=None, open_tick=None):
             marker=dict(symbol='circle-open', size=18, color='#00aaff', line=dict(width=2.5)),
             name='Open position',
             hovertemplate='<b>OPEN POSITION</b> at %{y:.2f}<extra></extra>'
-        ), row=1, col=1)
-
-    # Spread sub-chart
-    fig.add_trace(go.Scatter(
-        x=ts, y=spread,
-        fill='tozeroy',
-        fillcolor='rgba(100,180,255,0.12)',
-        line=dict(color='#6db4ff', width=1.2),
-        name='Spread',
-        hovertemplate='Spread: %{y:.4f}<extra></extra>'
-    ), row=2, col=1)
-
-    # Threshold line on spread chart
-    fig.add_hline(
-        y=0.0,
-        line=dict(color='rgba(255,200,0,0.6)', width=1, dash='dash'),
-        row=2, col=1,
-        annotation_text="Locked market (0.0)",
-        annotation_font_size=10,
-        annotation_font_color='rgba(255,200,0,0.8)'
-    )
+        ))
 
     fig.update_layout(
         template='plotly_dark',
@@ -249,10 +204,8 @@ def build_fig(df_slice, entry_ticks=None, exit_ticks=None, open_tick=None):
         legend=dict(orientation='h', y=1.06, x=0),
         hovermode='x unified'
     )
-    fig.update_xaxes(tickformat='%H:%M:%S', row=1, col=1)
-    fig.update_xaxes(tickformat='%H:%M:%S', rangeslider=dict(visible=True, thickness=0.04), row=2, col=1)
-    fig.update_yaxes(title_text='Price (ES)', row=1, col=1)
-    fig.update_yaxes(title_text='Spread', row=2, col=1)
+    fig.update_xaxes(tickformat='%H:%M:%S', rangeslider=dict(visible=True, thickness=0.04))
+    fig.update_yaxes(title_text='Price (ES)')
     return fig
 
 
@@ -261,8 +214,8 @@ def init_state():
     defaults = {
         'tick':        1,
         'last_date':   None,
-        'open_trade':  None,   # dict when a trade is open
-        'trade_log':   [],     # list of closed trade dicts
+        'open_trade':  None,
+        'trade_log':   [],
         'total_pnl':   0.0,
         'show_explain': True,
     }
@@ -301,12 +254,12 @@ with col2:
 with col3:
     running = st.toggle("Run simulation", value=False)
 
-# ── Placeholders — declared early so chart stays near top ───────
+# ── Placeholders ─────────────────────────────────────────────────
 chart_ph    = st.empty()
 time_ph     = st.empty()
 tradelog_ph = st.empty()
 
-# ── Current slice ─────────────────────────────────────────────────────
+# ── Current slice ─────────────────────────────────────────────────
 tick    = max(st.session_state.tick, 1)
 start   = max(0, tick - window_size)
 visible = df_all.iloc[start:tick]
@@ -319,10 +272,7 @@ mid_val    = latest['Mid']
 signal_label, signal_color, signal_explain = get_signal(spread_val, gamma_val)
 
 # ── Metrics row ───────────────────────────────────────────────────
-m1, m2, m3, m4, m5 = st.columns(5)
-m1.metric("Spread",       f"{spread_val:.4f} pts",
-          delta="WIDE" if spread_val > SPREAD_THRESHOLD else "NARROW",
-          delta_color="normal" if spread_val > SPREAD_THRESHOLD else "inverse")
+m2, m3, m4, m5 = st.columns(4)
 m2.metric("Mid Price",    f"{mid_val:.2f}")
 m3.metric("Gamma",        f"{gamma_val:.7f}",
           delta="LOW RISK" if gamma_val < GAMMA_THRESHOLD else "HIGH RISK",
@@ -426,7 +376,7 @@ if open_trade:
     )
 
 
-# ── Draw function (mirrors original working pattern) ──────────────
+# ── Draw function ─────────────────────────────────────────────────
 def draw(t):
     s   = max(0, t - window_size)
     vis = df_all.iloc[s:t]
@@ -471,7 +421,7 @@ def draw(t):
                 hide_index=True
             )
 
-# ── Run / pause (original working pattern) ───────────────────────
+# ── Run / pause ───────────────────────────────────────────────────
 if running:
     for t in range(st.session_state.tick, total + 1):
         st.session_state.tick = t
