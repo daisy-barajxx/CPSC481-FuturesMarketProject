@@ -279,43 +279,52 @@ with st.expander("Why this signal?", expanded=False):
 | Gamma < {GAMMA_THRESHOLD} | Low risk |
 """)
 
-# ── Trade buttons ─────────────────────────────────────────────────
-ba, bb, bc, _ = st.columns([1, 1, 1, 3])
+# ── Trade button ──────────────────────────────────────────────────
 open_trade = st.session_state.open_trade
+ba, bb, _ = st.columns([1, 1, 4])
 
 with ba:
-    if st.button("Enter Trade", disabled=(open_trade is not None) or (spread_val <= SPREAD_NEGATIVE),
-                 use_container_width=True):
-        st.session_state.open_trade = {
-            'tick': tick, 'timestamp': latest['timestamp'],
-            'mid': mid_val, 'ask': latest['Best_Ask'], 'bid': latest['Best_Bid'],
-            'spread': spread_val, 'gamma': gamma_val,
-        }
+    if open_trade is None:
+        # No open position → quote both sides simultaneously
+        btn_label    = "🟢 Quote Market (Buy + Sell)"
+        btn_disabled = spread_val <= SPREAD_NEGATIVE
+    else:
+        # Open position → close both sides
+        btn_label    = "🔴 Close Quote"
+        btn_disabled = False
+
+    if st.button(btn_label, disabled=btn_disabled, use_container_width=True):
+        if open_trade is None:
+            # Open: post bid AND ask at the same time
+            st.session_state.open_trade = {
+                'tick': tick, 'timestamp': latest['timestamp'],
+                'mid': mid_val,
+                'ask': latest['Best_Ask'], 'bid': latest['Best_Bid'],
+                'spread': spread_val, 'gamma': gamma_val,
+            }
+        else:
+            # Close: collect spread from both sides
+            entry = st.session_state.open_trade
+            pnl_pts, pnl_usd = calc_pnl(
+                pd.Series({'Spread': entry['spread'], 'Mid': entry['mid']}),
+                pd.Series({'Mid': mid_val})
+            )
+            st.session_state.trade_log.append({
+                'id':           len(st.session_state.trade_log) + 1,
+                'entry_tick':   entry['tick'], 'exit_tick': tick,
+                'entry_time':   entry['timestamp'].strftime('%H:%M:%S'),
+                'exit_time':    latest['timestamp'].strftime('%H:%M:%S'),
+                'entry_mid':    entry['mid'], 'exit_mid': mid_val,
+                'entry_spread': entry['spread'],
+                'pnl_pts':      pnl_pts, 'pnl_usd': pnl_usd,
+                'result':       '✅ WIN' if pnl_usd >= 0 else '❌ LOSS',
+            })
+            st.session_state.total_pnl  += pnl_usd
+            st.session_state.open_trade  = None
         st.rerun()
 
 with bb:
-    if st.button("Exit Trade", disabled=(open_trade is None), use_container_width=True):
-        entry = st.session_state.open_trade
-        pnl_pts, pnl_usd = calc_pnl(
-            pd.Series({'Spread': entry['spread'], 'Mid': entry['mid']}),
-            pd.Series({'Mid': mid_val})
-        )
-        st.session_state.trade_log.append({
-            'id': len(st.session_state.trade_log) + 1,
-            'entry_tick': entry['tick'], 'exit_tick': tick,
-            'entry_time': entry['timestamp'].strftime('%H:%M:%S'),
-            'exit_time':  latest['timestamp'].strftime('%H:%M:%S'),
-            'entry_mid':  entry['mid'], 'exit_mid': mid_val,
-            'entry_spread': entry['spread'],
-            'pnl_pts': pnl_pts, 'pnl_usd': pnl_usd,
-            'result': '✅ WIN' if pnl_usd >= 0 else '❌ LOSS',
-        })
-        st.session_state.total_pnl  += pnl_usd
-        st.session_state.open_trade  = None
-        st.rerun()
-
-with bc:
-    if st.button("Reset Trades", use_container_width=True):
+    if st.button("↺ Reset", use_container_width=True):
         st.session_state.update({'open_trade': None, 'trade_log': [], 'total_pnl': 0.0})
         st.rerun()
 
@@ -324,9 +333,12 @@ if open_trade:
         pd.Series({'Spread': open_trade['spread'], 'Mid': open_trade['mid']}),
         pd.Series({'Mid': mid_val})
     )
-    st.info(f"📌 **Open position** | Entry mid: {open_trade['mid']:.2f} | "
-            f"Spread: {open_trade['spread']:.4f} | Current mid: {mid_val:.2f} | "
-            f"Unrealized P&L: **${unr_usd:+.2f}**")
+    st.info(
+        f"📌 **Quoting both sides** | "
+        f"Bid: {open_trade['bid']:.2f} / Ask: {open_trade['ask']:.2f} | "
+        f"Spread: {open_trade['spread']:.4f} pts | "
+        f"Unrealized P&L: **${unr_usd:+.2f}**"
+    )
 
 # ── Draw ──────────────────────────────────────────────────────────
 def draw(t):
